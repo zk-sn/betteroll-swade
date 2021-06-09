@@ -141,7 +141,7 @@ async function apply_damage(token, wounds, soaked=0) {
         incapacitated = true;
         // Mark as defeated if the token is in a combat
         game.combat?.combatants.forEach(combatant => {
-            if (combatant.tokenId === token.id) {
+            if (combatant.token._id === token.id) {
                 token.update({overlayEffect: 'icons/svg/skull.svg'});
                 game.combat.updateCombatant(
                     {_id: combatant._id, defeated: true});
@@ -151,8 +151,41 @@ async function apply_damage(token, wounds, soaked=0) {
     // We cap damage on actor number of wounds
     final_wounds = Math.min(final_wounds, token.actor.data.data.wounds.max)
     // Finally we update actor and mark defeated
-    token.actor.update({'data.wounds.value': final_wounds,
-        'data.status.isShaken': final_shaken})
+    let actorUpdate = {'data.wounds.value': final_wounds};  // create object for actor update (we may not need to update shaken if it's handled by active effect)
+    let updateShaken = true; // We don't need to update shaken value if it's handled by status effect changes
+    let shakenEffectExists = token.actor.effects.find(e => e.getFlag('core', 'statusId') === "shaken"); // Does a shaken status effect exist on the actor?
+    if (shakenEffectExists) {
+        if (shakenEffectExists.hasOwnProperty('changes')) {
+            if (shakenEffectExists.changes.find(e => (e.key === "data.status.isShaken" && e.value === "true"))) {
+                // shaken is entirely handled by the status effect, we don't need to update data.status.isShaken
+            updateShaken = false;
+            }
+        }
+    }
+    if (shakenEffectExists && !final_shaken) {
+        // Actor has shaken effect, but should not be shaken
+        shakenEffectExists.delete();  // remove the status effect
+    } else if (!shakenEffectExists && final_shaken) {
+        // Actor does not have a shaken status effect but should be shaken
+        let shakenEffect = foundry.utils.deepClone(CONFIG.SWADE.statusEffects.find(e => e.id === "shaken"));
+        shakenEffect.label = game.i18n.localize("SWADE.Shaken");
+        shakenEffect["flags.core.statusId"] = "shaken";
+        delete shakenEffect.id;
+        const cls = getDocumentClass("ActiveEffect");
+        await cls.create(shakenEffect, {parent: token.actor});
+        if (shakenEffect.hasOwnProperty('changes')) {
+            if (shakenEffect.changes.find(e => (e.key === "data.status.isShaken" && e.value === "true"))) {
+                // shaken is entirely handled by the status effect, we don't need to update data.status.isShaken
+                updateShaken = false;
+            }
+        }
+    }
+
+    if (updateShaken == true) {
+        actorUpdate["data.status.isShaken"] = final_shaken;  // add shaken update to actor update if it's not handled by status effect
+    }
+    token.actor.update(actorUpdate);
+
     return {text: text, incapacitated: incapacitated};
 }
 
@@ -165,8 +198,41 @@ async function undo_damage(message){
     const actor = get_actor_from_message(message);
     const render_data = message.getFlag('betterrolls-swade2',
         'render_data');
-    await actor.update({"data.wounds.value": render_data.undo_values.wounds,
-        "data.status.isShaken": render_data.undo_values.shaken});
+    const actorUpdate = {"data.wounds.value": render_data.undo_values.wounds}; // create object for actor update (we may not need to update shaken if it's handled by active effect)
+    let updateShaken = true;
+    let undoValueShaken = render_data.undo_values.shaken; // what do we want shaken to be after undo
+    const shakenEffectExists = actor.effects.find(e=> e.getFlag('core', 'statusId') === 'shaken'); // does the actor already have shaken active effect?
+    if (shakenEffectExists) {
+        if (shakenEffectExists.hasOwnProperty('changes')) {
+            if (shakenEffectExists.changes.find(e => (e.key === "data.status.isShaken" && e.value === "true"))) {
+                // shaken is entirely handled by the status effect, we don't need to update data.status.isShaken
+            updateShaken = false;
+            }
+        }
+    }
+    if (shakenEffectExists && !undoValueShaken) {
+        // actor has a shaken active effect, and after undo actor should not be shaken
+        shakenEffectExists.delete();
+    } else if (!shakenEffectExists && undoValueShaken) {
+        // actor does not have a shaken active effect, and after undo actor should be shaken
+        let shakenEffect = foundry.utils.deepClone(CONFIG.SWADE.statusEffects.find(e => e.id === "shaken"));
+        shakenEffect.label = game.i18n.localize("SWADE.Shaken");
+        shakenEffect["flags.core.statusId"] = "shaken";
+        delete shakenEffect.id;
+        const cls = getDocumentClass("ActiveEffect");
+        await cls.create(shakenEffect, {parent: actor});
+        if (shakenEffect.hasOwnProperty('changes')) {
+            if (shakenEffect.changes.find(e => (e.key === "data.status.isShaken" && e.value === "true"))) {
+                // the shaken active effect "changes" section is already setting the data.status.isShaken, we don't need to update it
+                updateShaken = false;
+            }
+        }
+    }
+    if (updateShaken == true) {
+        actorUpdate["data.status.isShaken"] = undoValueShaken;
+    }
+    await actor.update(actorUpdate);
+    
     const token = message.getFlag('betterrolls-swade2', 'token');
     if (token) {
         game.combat?.combatants.forEach(combatant => {
